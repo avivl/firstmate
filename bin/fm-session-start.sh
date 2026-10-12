@@ -240,10 +240,6 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-# Whether the process environment carried FM_HOME at launch, before the default
-# below fills it in; the omp extension-not-loaded warning names this cause.
-FM_HOME_ENV_SET=0
-[ -z "${FM_HOME:-}" ] || FM_HOME_ENV_SET=1
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
@@ -871,9 +867,7 @@ if [ "$PRIMARY_HARNESS" = omp ]; then
     # Warning only: name the cause when existing facts establish it.
     OMP_MARKER_PID=$(sed -n '2p' "$OMP_WATCH_MARKER" 2>/dev/null || true)
     OMP_CURRENT_PID=${REBUILDING_SESSION_PID:-$(sed -n '1p' "$OMP_LOCK" 2>/dev/null || true)}
-    if [ "$FM_HOME_ENV_SET" -eq 0 ]; then
-      printf 'OMP_WATCH_CAUSE: FM_HOME is unset in this process environment, so the extension attaches to the firstmate checkout home instead of this one\n'
-    elif [ -n "$OMP_MARKER_PID" ] && [ -n "$OMP_CURRENT_PID" ] && [ "$OMP_MARKER_PID" != "$OMP_CURRENT_PID" ]; then
+    if [ -n "$OMP_MARKER_PID" ] && [ -n "$OMP_CURRENT_PID" ] && [ "$OMP_MARKER_PID" != "$OMP_CURRENT_PID" ]; then
       printf 'OMP_WATCH_CAUSE: the extension marker %s names pid %s, which is not this session (pid %s)\n' "$OMP_WATCH_MARKER" "$OMP_MARKER_PID" "$OMP_CURRENT_PID"
     fi
   fi

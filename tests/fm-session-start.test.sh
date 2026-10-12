@@ -2992,7 +2992,8 @@ EOF
   # FM_HOME unset in the process environment.
   out=$(env -u CLAUDECODE -u PI_CODING_AGENT -u FM_PI_HARNESS -u GROK_AGENT -u FM_HOME FM_FAKE_HARNESS=omp \
     FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" "$SESSION_START")
-  assert_contains "$out" "OMP_WATCH_CAUSE: FM_HOME is unset in this process environment" "omp diagnostic did not name the unset FM_HOME cause"
+  assert_contains "$out" "OMP_WATCH_EXTENSION: not loaded - restart omp with this home as its working directory" "omp diagnostic lost the checkout wording with FM_HOME unset"
+  assert_not_contains "$out" "OMP_WATCH_CAUSE" "omp diagnostic named a cause for the checkout home with FM_HOME unset"
 
   # Marker names a pid that is not this session.
   install_omp_extension_fixtures "$root"
@@ -3001,7 +3002,7 @@ EOF
     FM_HOME="$root" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" "$SESSION_START")
   assert_contains "$out" "OMP_WATCH_EXTENSION: not loaded" "stale-pid marker must still report not loaded"
   assert_contains "$out" "OMP_WATCH_CAUSE: the extension marker $root/state/.omp-watch-extension-loaded names pid 424242, which is not this session" "omp diagnostic did not name the foreign marker pid"
-  assert_not_contains "$out" "FM_HOME is unset" "omp diagnostic named the unset cause with FM_HOME exported"
+  assert_not_contains "$out" "FM_HOME is unset" "omp diagnostic named an unset FM_HOME cause"
   pass "omp diagnostic keeps today's wording for the checkout home and names the establishable cause"
 }
 
