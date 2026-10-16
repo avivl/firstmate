@@ -1,0 +1,4 @@
+ok - session start emits the omp block and reports omp extension load state
+ok - omp diagnostic keeps today's wording for the checkout home and names the establishable cause
+ok - session start accepts current omp markers written before lock acquisition
+OMP_SELECTED_OK
