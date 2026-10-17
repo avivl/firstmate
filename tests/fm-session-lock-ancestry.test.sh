@@ -1325,6 +1325,113 @@ SH
   pass "session-lock e2e: fm-lock.sh refuses under an omp daemon worker and the session reclaims a worker-pinned lock"
 }
 
+# A re-anchor moves leases recorded against the old live line 1 onto the new
+# anchor, so the other supervision actor still cannot claim a held task.
+test_reanchor_keeps_task_leases_live() {
+  local dir front_pid model_pid lease_rc
+  dir="$TMP_ROOT/reanchor-leases"
+  mkdir -p "$dir/state"
+  "$NAMED_CLAUDE" -c '
+    printf "%s\n" "$$" > "$0/state/front-pid"
+    while [ ! -e "$0/state/stop" ] && [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ]; do sleep 0.05; done
+  ' "$dir" &
+  BG_FIXTURE_PIDS+=("$!")
+  wait_for_file "$dir/state/front-pid" "the front-end pid"
+  front_pid=$(tr -d '[:space:]' < "$dir/state/front-pid")
+  printf '%s\n' "$front_pid" > "$dir/state/.lock"
+  printf 'S1\n' > "$dir/state/.lock-session"
+  printf 'branch\t%s\t100\n' "$front_pid" > "$dir/state/.lease-t1"
+  printf 'main\t%s\t200\n' "$front_pid" > "$dir/state/.lease-t2"
+  printf 'branch\t%s\t300\n' "$$" > "$dir/state/.lease-t3"
+  cp "$dir/state/.lease-t3" "$dir/state/lease-t3-before"
+  env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
+    FM_HOME="$dir" FM_LOCK="$ROOT/bin/fm-lock.sh" \
+    "$NAMED_CLAUDE" -c '
+      CLAUDE_CODE_SESSION_ID=S1 CLAUDE_PID=$$ "$FM_LOCK" > "$FM_HOME/state/reanchor.out" 2>&1
+      printf "%s\n" "$?" > "$FM_HOME/state/reanchor.rc"
+      printf "%s\n" "$$" > "$FM_HOME/state/model-pid"
+      while [ ! -e "$FM_HOME/state/stop" ] && [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ]; do sleep 0.05; done
+    ' &
+  BG_FIXTURE_PIDS+=("$!")
+  wait_for_file "$dir/state/model-pid" "the model-loop pid"
+  model_pid=$(tr -d '[:space:]' < "$dir/state/model-pid")
+  expect_code 0 "$(tr -d '[:space:]' < "$dir/state/reanchor.rc")" \
+    "the same-session re-anchor failed: $(cat "$dir/state/reanchor.out")"
+  kill -0 "$front_pid" 2>/dev/null || fail "the front-end exited, so the lock line was never live"
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$model_pid" ] \
+    || fail "the re-anchor left lock line 1 at $(cat "$dir/state/.lock"), expected $model_pid"
+  [ "$(cat "$dir/state/.lease-t1")" = "$(printf 'branch\t%s\t100' "$model_pid")" ] \
+    || fail "the branch lease was not moved to the new anchor: $(cat "$dir/state/.lease-t1")"
+  [ "$(cat "$dir/state/.lease-t2")" = "$(printf 'main\t%s\t200' "$model_pid")" ] \
+    || fail "the main lease was not moved to the new anchor: $(cat "$dir/state/.lease-t2")"
+  cmp -s "$dir/state/lease-t3-before" "$dir/state/.lease-t3" \
+    || fail "a lease recorded against another pid changed: $(cat "$dir/state/.lease-t3")"
+  env -u FM_SUPERVISION_ACTOR -u FM_LEASE_HOLDER_PID FM_HOME="$dir" \
+    "$ROOT/bin/fm-lease.sh" claim t1 > "$dir/state/main-claim.out" 2>&1
+  lease_rc=$?
+  expect_code 6 "$lease_rc" "main claimed the branch's task after the re-anchor: $(cat "$dir/state/main-claim.out")"
+  env -u FM_SUPERVISION_ACTOR FM_HOME="$dir" FM_SUPERVISION_ACTOR=branch FM_LEASE_HOLDER_PID="$model_pid" \
+    "$ROOT/bin/fm-lease.sh" claim t2 > "$dir/state/branch-claim.out" 2>&1
+  lease_rc=$?
+  expect_code 6 "$lease_rc" "the branch claimed main's task after the re-anchor: $(cat "$dir/state/branch-claim.out")"
+  : > "$dir/state/stop"
+  pass "session-lock: a re-anchor keeps both supervision actors' task leases live"
+}
+
+autoarm_midturn_healthy() {  # <state-dir>
+  FM_STATE_OVERRIDE="$1" bash -c '. "$0"; fm_autoarm_midturn_healthy "$FM_STATE_OVERRIDE" 300' "$ROOT/bin/fm-wake-lib.sh"
+}
+
+# A re-anchor during a rewake handling turn that has outrun grace moves the
+# auto-arm ledger's session_pid with line 1 and keeps the ledger's other bytes
+# and mtime, so the mid-turn guard still sees healthy supervision.
+test_reanchor_keeps_autoarm_midturn_healthy() {
+  local dir front_pid model_pid
+  dir="$TMP_ROOT/reanchor-autoarm"
+  mkdir -p "$dir/state"
+  "$NAMED_CLAUDE" -c '
+    printf "%s\n" "$$" > "$0/state/front-pid"
+    while [ ! -e "$0/state/stop" ] && [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ]; do sleep 0.05; done
+  ' "$dir" &
+  BG_FIXTURE_PIDS+=("$!")
+  wait_for_file "$dir/state/front-pid" "the front-end pid"
+  front_pid=$(tr -d '[:space:]' < "$dir/state/front-pid")
+  printf '%s\n' "$front_pid" > "$dir/state/.lock"
+  printf 'S1\n' > "$dir/state/.lock-session"
+  printf 'epoch=7 owner_pid=1 outcome=rewake updated_at=1 session_pid=%s recovery_generation=g1\nidentity-1\n' \
+    "$front_pid" > "$dir/state/.claude-autoarm-epoch"
+  printf 'acked:handling:g1\n' > "$dir/state/.watcher-down"
+  touch -t 201901010000 "$dir/state/.last-watcher-beat"
+  touch -t 202001010000 "$dir/state/.claude-autoarm-epoch" "$dir/state/epoch-mtime"
+  autoarm_midturn_healthy "$dir/state" || fail "the rewake fixture is not healthy before the re-anchor, so this case proves nothing"
+  env -u CLAUDE_CODE_SESSION_ID -u CLAUDE_PID \
+    FM_HOME="$dir" FM_LOCK="$ROOT/bin/fm-lock.sh" \
+    "$NAMED_CLAUDE" -c '
+      CLAUDE_CODE_SESSION_ID=S1 CLAUDE_PID=$$ "$FM_LOCK" > "$FM_HOME/state/reanchor.out" 2>&1
+      printf "%s\n" "$?" > "$FM_HOME/state/reanchor.rc"
+      printf "%s\n" "$$" > "$FM_HOME/state/model-pid"
+      while [ ! -e "$FM_HOME/state/stop" ] && [ "$SECONDS" -lt "${FM_TEST_STUB_MAX_BLOCK_SECONDS:-120}" ]; do sleep 0.05; done
+    ' &
+  BG_FIXTURE_PIDS+=("$!")
+  wait_for_file "$dir/state/model-pid" "the model-loop pid"
+  model_pid=$(tr -d '[:space:]' < "$dir/state/model-pid")
+  expect_code 0 "$(tr -d '[:space:]' < "$dir/state/reanchor.rc")" \
+    "the same-session re-anchor failed: $(cat "$dir/state/reanchor.out")"
+  kill -0 "$front_pid" 2>/dev/null || fail "the front-end exited, so the lock line was never live"
+  [ "$(tr -d '[:space:]' < "$dir/state/.lock")" = "$model_pid" ] \
+    || fail "the re-anchor left lock line 1 at $(cat "$dir/state/.lock"), expected $model_pid"
+  [ "$(cat "$dir/state/.claude-autoarm-epoch")" = "$(printf 'epoch=7 owner_pid=1 outcome=rewake updated_at=1 session_pid=%s recovery_generation=g1\nidentity-1' "$model_pid")" ] \
+    || fail "the rewake was not moved to the new anchor intact: $(cat "$dir/state/.claude-autoarm-epoch")"
+  if [ "$dir/state/.claude-autoarm-epoch" -nt "$dir/state/epoch-mtime" ] \
+    || [ "$dir/state/.claude-autoarm-epoch" -ot "$dir/state/epoch-mtime" ]; then
+    fail "the rewake move changed the ledger mtime"
+  fi
+  autoarm_midturn_healthy "$dir/state" \
+    || fail "the mid-turn guard rejects the rewake after the re-anchor: $(cat "$dir/state/reanchor.out")"
+  : > "$dir/state/stop"
+  pass "session-lock: a re-anchor during a rewake turn keeps the mid-turn auto-arm proof healthy"
+}
+
 test_version_named_session_is_identified_on_both_platforms
 test_harness_at_namespace_pid1_is_examined
 test_ordinary_paths_are_never_harness_processes
@@ -1345,3 +1452,5 @@ test_reanchor_keeps_task_leases_live
 test_reanchor_keeps_autoarm_midturn_healthy
 test_omp_daemon_worker_is_never_the_session
 test_e2e_fm_lock_under_omp_daemon_worker
+test_reanchor_keeps_task_leases_live
+test_reanchor_keeps_autoarm_midturn_healthy
